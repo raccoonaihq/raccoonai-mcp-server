@@ -22,6 +22,13 @@ Before using the Raccoon LAM MCP server, you'll need:
 
 ## Installation
 
+### Using Smithery
+
+```bash
+npx -y @smithery/cli@latest install @raccoonaihq/raccoonai-mcp-server --client claude
+```
+
+
 ### From source
 
 ```bash
@@ -34,7 +41,7 @@ cd raccoonai-mcp-server
 uv pip install -e .
 ```
 
-### To configure in Claude Desktop
+#### To configure in Claude Desktop
 
 ```bash
 mcp install src/raccoonai_mcp_server/server.py -v RACCOON_SECRET_KEY=<RACCOON_SECRET_KEY> -v RACCOON_PASSCODE=<RACCOON_PASSCODE>

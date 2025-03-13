@@ -1,9 +1,10 @@
-from mcp.server.fastmcp import FastMCP, Context
 import json
-from typing import Dict, List, Optional, Any, AsyncIterator
-from contextlib import asynccontextmanager
 import os
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Dict, List, Optional, Any, AsyncIterator
+
+from mcp.server.fastmcp import FastMCP, Context
 from raccoonai import AsyncRaccoonAI
 
 
@@ -24,7 +25,7 @@ async def raccoon_lifespan(server: FastMCP) -> AsyncIterator[RaccoonContext]:
     if not raccoon_passcode:
         raise EnvironmentError("Warning: RACCOON_PASSCODE not found in environment variables")
 
-    client = AsyncRaccoonAI(secret_key=secret_key, base_url="http://localhost:3800")
+    client = AsyncRaccoonAI(secret_key=secret_key)
 
     try:
         yield RaccoonContext(client=client, raccoon_passcode=raccoon_passcode)
@@ -33,14 +34,14 @@ async def raccoon_lifespan(server: FastMCP) -> AsyncIterator[RaccoonContext]:
 
 
 mcp = FastMCP(
-    "Raccoon LAM",
+    "raccoonai",
     description="MCP server for Raccoon AI LAM API",
-    dependencies=["raccoonai", "httpx"],
+    dependencies=["raccoonai"],
     lifespan=raccoon_lifespan
 )
 
 
-@mcp.resource("schema://lam_request")
+@mcp.resource("schema://raccoonai_lam_tool")
 def get_lam_request_schema() -> str:
     """Get the schema for LAM API requests."""
     schema = {
@@ -74,7 +75,11 @@ def get_lam_request_schema() -> str:
             "mode": {
                 "type": "string",
                 "enum": ["deepsearch", "default"],
-                "description": "Mode of execution (default: 'default')."
+                "description":
+                    """
+                    Mode of execution (default: 'default'). Can be set to deepsearch if the user task requires gathering 
+                    information from multiple sources or requires research.
+                    """
             },
             "advanced": {
                 "type": "object",
@@ -85,35 +90,10 @@ def get_lam_request_schema() -> str:
     return json.dumps(schema, indent=2)
 
 
-@mcp.resource("info://raccoon_lam")
-def get_raccoon_lam_info() -> str:
-    """Get information about the Raccoon LAM API."""
-    return """
-# Raccoon LAM (Large Action Model) API
-
-The Raccoon LAM API enables AI agents to browse and interact with the web to perform tasks like:
-- Data extraction from websites
-- Online research and information gathering
-- Web navigation and form submission
-- Executing complex workflows across multiple sites
-
-## Key Features
-- **Web Browsing**: Automated navigation of web pages
-- **Data Extraction**: Structured data extraction from websites
-- **Schema Definition**: Define the structure of data you want extracted
-
-## Capabilities
-- Search and browse websites
-- Fill out forms and navigate UI elements
-- Extract structured data based on defined schemas
-- Handle multi-step processes across websites
-"""
-
-
-@mcp.tool()
+@mcp.tool(name="raccoonai_lam_tool")
 async def lam_run(
         query: str,
-        response_schema: Dict[str, Any],
+        response_schema: Optional[Dict[str, Any]],
         app_url: Optional[str] = "",
         chat_history: Optional[List[Dict[str, Any]]] = None,
         max_count: Optional[int] = 1,
@@ -123,11 +103,33 @@ async def lam_run(
         ctx: Context = None
 ) -> str:
     """
-    Run a Raccoon LAM query to extract data from websites.
+    The Raccoon LAM Tool enables AI agents to browse and interact with the web to perform tasks like:
+    - Executing simple and complex web tasks and workflows across multiple sites
+    - Web navigation and form submission
+    - Data extraction from websites
+    - Online research and information gathering
+
+    ## Key Features
+    - **Web Browsing and Web Tasks**: Automated navigation of web pages and completion of user defined tasks
+    - **Data Extraction**: Structured data extraction from websites
+    - **Schema Definition**: Define the structure of data you want extracted
+
+    ## Capabilities
+    - Search and browse websites
+    - Fill out forms and navigate UI elements
+    - Extract structured data based on defined schemas
+    - Handle multistep tasks across websites
+
+    ## Schemas and Deepsearch
+    - Schemas are used only when you want to extract information from the web.
+    - Deepsearch is only used if answering the query involves gathering data from multiple sources and detailed reports.
+    - Schemas can be used alongside deepsearch.
+    - Schemas should not be used when the user query is about performing actions/task rather than data collection
+
 
     Args:
         query: The input query string for the request
-        response_schema: The expected schema for the response
+        response_schema: The expected schema for the response (optional)
         app_url: The entrypoint URL for the web agent (optional)
         chat_history: Chat history as list of messages (optional)
         max_count: Maximum number of results (default: 1)
@@ -211,6 +213,7 @@ def _format_lam_result(response) -> str:
         result = {
             "task_status": response.task_status,
             "message": response.message,
+            "properties": response.properties,
             "data": response.data if hasattr(response, "data") else []
         }
         if hasattr(response, "livestream_url"):
@@ -219,21 +222,21 @@ def _format_lam_result(response) -> str:
     status = result.get("task_status", "UNKNOWN")
     message = result.get("message", "")
     data = result.get("data", [])
+    properties = result.get("properties", {})
 
     formatted = f"Status: {status}\n\n"
 
     if message:
         formatted += f"Message: {message}\n\n"
 
-    if status == "DONE" and data:
+    if properties:
+        formatted += f"Properties: {properties}\n\n"
+
+    if data:
         formatted += "Extracted Data:\n"
         for i, item in enumerate(data, 1):
             formatted += f"\n--- Result {i} ---\n"
             formatted += json.dumps(item, indent=2)
-
-    if status == "HUMAN_INTERACTION":
-        livestream_url = result.get("livestream_url", "Not available")
-        formatted += f"Livestream URL: {livestream_url}\n"
 
     return formatted
 
@@ -257,29 +260,26 @@ Please create a Raccoon LAM query that will extract this data in a structured fo
 2. Any advanced settings needed (like CAPTCHA solving if applicable)
 3. The base app_url
 4. A clear query instructing the web agent
+5. A value for mode which can be default or deepsearch
 """
 
 
 @mcp.prompt()
-def compare_websites_prompt(website_urls: str, comparison_criteria: str) -> str:
+def execute_web_task_prompt(entrypoint_url: str, task_to_execute: str) -> str:
     """
-    Create a prompt for comparing data from multiple websites.
+    Create a prompt for executing actions on one or multiple websites.
 
     Args:
-        website_urls: Comma-separated list of website URLs to compare
-        comparison_criteria: What to compare between the websites
+        entrypoint_url: URL of the website to start the execution from
+        task_to_execute: Description of the task to execute
     """
     return f"""
-I need to compare the following websites:
-{website_urls}
-
-I want to compare them based on these criteria:
-{comparison_criteria}
+I need to do the task: {task_to_execute} starting from the following website: {entrypoint_url}
 
 Please create a Raccoon LAM query that will:
-1. Visit each website
-2. Extract the relevant data into a consistent schema
-3. Present the results in a way that facilitates comparison
+1. Visit the entrypoint url
+2. Execute the required task on behalf of the user
+3. Share acknowledgement with the user that the task is successful
 """
 
 
@@ -288,11 +288,8 @@ def get_usage_info() -> str:
     """Get information about LAM API usage."""
     return """
 To view your Raccoon API usage:
-1. Visit your Raccoon dashboard at https://flyingraccoon.tech/dashboard
-2. Navigate to the "Usage" section
-3. View your current billing cycle information
-
-For programmatic access, you can create an API key with usage tracking permissions.
+1. Visit the usage page on Raccoon Platform at https://platform.flyingraccoon.tech/usage
+2. View your current usage and billing information
 """
 
 
@@ -322,4 +319,3 @@ async def sample_lam_query(ctx: Context) -> str:
     }
 
     return json.dumps(sample, indent=2)
-
