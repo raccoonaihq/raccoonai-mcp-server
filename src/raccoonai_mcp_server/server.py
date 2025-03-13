@@ -1,5 +1,3 @@
-import sys
-
 from mcp.server.fastmcp import FastMCP, Context
 import json
 from typing import Dict, List, Optional, Any, AsyncIterator
@@ -13,6 +11,7 @@ from raccoonai import AsyncRaccoonAI
 class RaccoonContext:
     """Context for the Raccoon API client."""
     client: AsyncRaccoonAI
+    raccoon_passcode: str
 
 
 @asynccontextmanager
@@ -20,12 +19,15 @@ async def raccoon_lifespan(server: FastMCP) -> AsyncIterator[RaccoonContext]:
     """Initialize the Raccoon AI client."""
     secret_key = os.environ.get("RACCOON_SECRET_KEY")
     if not secret_key:
-        print("Warning: RACCOON_SECRET_KEY not found in environment variables", file=sys.stderr)
+        raise EnvironmentError("Warning: RACCOON_SECRET_KEY not found in environment variables")
+    raccoon_passcode = os.environ.get("RACCOON_PASSCODE")
+    if not raccoon_passcode:
+        raise EnvironmentError("Warning: RACCOON_PASSCODE not found in environment variables")
 
-    client = AsyncRaccoonAI(base_url="http://localhost:3800")
+    client = AsyncRaccoonAI(secret_key=secret_key, base_url="http://localhost:3800")
 
     try:
-        yield RaccoonContext(client=client)
+        yield RaccoonContext(client=client, raccoon_passcode=raccoon_passcode)
     finally:
         pass
 
@@ -43,7 +45,7 @@ def get_lam_request_schema() -> str:
     """Get the schema for LAM API requests."""
     schema = {
         "type": "object",
-        "required": ["query", "raccoon_passcode"],
+        "required": ["query"],
         "properties": {
             "query": {
                 "type": "string",
@@ -74,10 +76,6 @@ def get_lam_request_schema() -> str:
                 "enum": ["deepsearch", "default"],
                 "description": "Mode of execution (default: 'default')."
             },
-            "raccoon_passcode": {
-                "type": "string",
-                "description": "The raccoon passcode associated with the end user."
-            },
             "advanced": {
                 "type": "object",
                 "description": "Advanced configuration options for the session."
@@ -103,22 +101,18 @@ The Raccoon LAM API enables AI agents to browse and interact with the web to per
 - **Web Browsing**: Automated navigation of web pages
 - **Data Extraction**: Structured data extraction from websites
 - **Schema Definition**: Define the structure of data you want extracted
-- **Streaming Responses**: Get real-time updates on the agent's progress
-- **Advanced Options**: Use proxies, solve CAPTCHAs, block ads
 
 ## Capabilities
 - Search and browse websites
 - Fill out forms and navigate UI elements
 - Extract structured data based on defined schemas
 - Handle multi-step processes across websites
-- Stream back thoughts and actions in real-time
 """
 
 
 @mcp.tool()
 async def lam_run(
         query: str,
-        raccoon_passcode: str,
         response_schema: Dict[str, Any],
         app_url: Optional[str] = "",
         chat_history: Optional[List[Dict[str, Any]]] = None,
@@ -133,7 +127,6 @@ async def lam_run(
 
     Args:
         query: The input query string for the request
-        raccoon_passcode: The raccoon passcode for the end user
         response_schema: The expected schema for the response
         app_url: The entrypoint URL for the web agent (optional)
         chat_history: Chat history as list of messages (optional)
@@ -148,6 +141,7 @@ async def lam_run(
     """
     raccoon_ctx: RaccoonContext = ctx.request_context.lifespan_context
     client = raccoon_ctx.client
+    raccoon_passcode = raccoon_ctx.raccoon_passcode
 
     if not chat_history:
         chat_history = []
@@ -160,10 +154,8 @@ async def lam_run(
             "extension_ids": []
         }
 
-    # Prepare request parameters
     params = {
         "query": query,
-        "raccoon_passcode": raccoon_passcode,
         "schema": response_schema,
         "app_url": app_url,
         "chat_history": chat_history,
@@ -175,27 +167,28 @@ async def lam_run(
 
     try:
         if stream:
-            return await _stream_lam_response(client, params, ctx)
+            return await _stream_lam_response(client, raccoon_passcode, params, ctx)
         else:
-            return await _fetch_lam_response(client, params)
+            return await _fetch_lam_response(client, raccoon_passcode, params)
     except Exception as e:
         return f"Error: Failed to connect to Raccoon API: {str(e)}"
 
 
-async def _fetch_lam_response(client: AsyncRaccoonAI, params: Dict[str, Any]) -> str:
+async def _fetch_lam_response(client: AsyncRaccoonAI, raccoon_passcode: str, params: Dict[str, Any]) -> str:
     """Fetch a complete LAM response (non-streamed)."""
-    response = await client.lam.run(**params)
+    response = await client.lam.run(**params, raccoon_passcode=raccoon_passcode)
     return _format_lam_result(response)
 
 
 async def _stream_lam_response(
         client: AsyncRaccoonAI,
+        raccoon_passcode: str,
         params: Dict[str, Any],
         ctx: Context
 ) -> str:
     """Stream LAM responses and report progress."""
     last_response = None
-    stream = await client.lam.run(**params)
+    stream = await client.lam.run(**params, raccoon_passcode=raccoon_passcode)
 
     async for response in stream:
         last_response = response
@@ -310,7 +303,6 @@ async def sample_lam_query(ctx: Context) -> str:
     """
     sample = {
         "query": "Find three YCombinator startups who got funded in W24",
-        "raccoon_passcode": "<end-user-raccoon-passcode>",
         "app_url": "https://www.ycombinator.com/companies",
         "schema": {
             "name": "Name of the company as a string",

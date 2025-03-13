@@ -1,0 +1,18 @@
+# Smithery configuration file: https://smithery.ai/docs/deployments
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    required:
+      - raccoon_secret_key
+      - raccoon_passcode
+    properties:
+      raccoon_secret_key:
+        type: string
+        description: The secret key for using Raccoon AI APIs, can be obtained from https://platform.flyingraccoon.tech
+      raccoon_passcode:
+        type: string
+        description: The passcode for identifying your user and auth context, can be obtained from https://platform.flyingraccoon.tech
+  commandFunction:
+    |-
+    (config) => ({ command: 'uv', args: ['run', '-m', 'raccoonai_mcp_server'], env: { RACCOON_SECRET_KEY: config.raccoon_secret_key, RACCOON_PASSCODE: config.raccoon_passcode } })
